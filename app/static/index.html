@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SecureShip</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <h1>SecureShip</h1>
+    <p>Create and track shipments</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>New shipment</h2>
+      <form id="create-form" autocomplete="off">
+        <label>Sender
+          <input name="sender" maxlength="60" required>
+        </label>
+        <label>Receiver
+          <input name="receiver" maxlength="60" required>
+        </label>
+        <label>Destination
+          <input name="destination" maxlength="100" required>
+        </label>
+        <label>Item
+          <input name="item" maxlength="100" required>
+        </label>
+        <button type="submit">Create shipment</button>
+      </form>
+      <p id="form-message" class="message" role="status"></p>
+    </section>
+
+    <section class="card">
+      <div class="list-head">
+        <h2>Shipments <span id="count" class="pill">0</span></h2>
+        <input id="search" type="search" placeholder="Search code or receiver" aria-label="Search shipments">
+      </div>
+      <p id="empty" class="muted">No shipments yet. Create one above.</p>
+      <ul id="list" class="list"></ul>
+    </section>
+  </main>
+
+  <footer>SecureShip &middot; <a href="/docs">API docs</a></footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.env
+.env.*
+!.env.example
+*.log
+reports/
+sbom/
+*.spdx.json
+trivy-report.txt
+image.tar
+dist/
+build/

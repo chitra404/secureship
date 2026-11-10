@@ -1,0 +1,210 @@
+name: SecureShip Security Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Default for every job: read-only. Jobs below only ask for more if they need it.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  LOCAL_IMAGE: secureship-api:${{ github.sha }}
+
+# Every third-party action is pinned to a full commit SHA (the comment shows the
+# human-readable version). Dependabot keeps these up to date.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: runs for pull requests AND pushes. Read-only. Cannot publish or sign.
+  # ---------------------------------------------------------------------------
+  build-scan:
+    name: Test, build, scan, SBOM
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run application tests
+        run: python -m pytest -q
+
+      - name: Build candidate image
+        run: |
+          docker build --pull \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t "${LOCAL_IMAGE}" .
+
+      # Report first (never fails) so the evidence is kept even when the gate fails.
+      - name: Trivy report (HIGH and CRITICAL, informational)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          format: table
+          output: trivy-report.txt
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
+          vuln-type: os,library
+          scanners: vuln
+
+      - name: Show Trivy report
+        if: always()
+        run: |
+          if [ -f trivy-report.txt ]; then cat trivy-report.txt; else echo "No Trivy report was produced."; fi
+
+      # The release gate: any fixable CRITICAL finding stops the pipeline here.
+      - name: Trivy release gate (fails on CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          image-ref: ${{ env.LOCAL_IMAGE }}
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          vuln-type: os,library
+          scanners: vuln
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.LOCAL_IMAGE }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: secureship-sbom-${{ github.sha }}
+          path: sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: secureship-trivy-report-${{ github.sha }}
+          path: trivy-report.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Hand the exact image that passed the gate to the publish job.
+      - name: Save approved image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker save "${LOCAL_IMAGE}" -o image.tar
+
+      - name: Upload approved image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: secureship-image-${{ github.sha }}
+          path: image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Job 2: runs ONLY for a push to main, and only if job 1 passed.
+  # This is the only job that can write packages or request an OIDC token.
+  # ---------------------------------------------------------------------------
+  publish-sign:
+    name: Publish, sign, verify
+    needs: build-scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write # push the image to GHCR
+      id-token: write # keyless Cosign signing (GitHub OIDC)
+
+    steps:
+      - name: Download approved image
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: secureship-image-${{ github.sha }}
+
+      - name: Load approved image
+        run: docker load -i image.tar
+
+      - name: Log in to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish approved image
+        run: |
+          set -euo pipefail
+          IMAGE="$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+          docker tag "${LOCAL_IMAGE}" "${IMAGE}:${GITHUB_SHA}"
+          docker push "${IMAGE}:${GITHUB_SHA}"
+
+          DIGEST="$(docker image inspect "${IMAGE}:${GITHUB_SHA}" \
+            --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+            | grep "^${IMAGE}@" | head -n 1 | cut -d@ -f2 || true)"
+
+          if [ -z "${DIGEST}" ]; then
+            echo "Unable to determine pushed image digest."
+            exit 1
+          fi
+
+          echo "IMAGE=${IMAGE}" >> "${GITHUB_ENV}"
+          echo "IMAGE_DIGEST=${DIGEST}" >> "${GITHUB_ENV}"
+          echo "Published ${IMAGE}@${DIGEST}"
+
+      - name: Set up Cosign
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+
+      - name: Sign image digest with Cosign (keyless)
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${IMAGE_DIGEST}"
+
+      # Verify against a FIXED policy: this exact repo, this workflow file, main branch.
+      - name: Verify image signature
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/secure-pipeline.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${IMAGE_DIGEST}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Release published and verified"
+            echo ""
+            echo "- Image: \`${IMAGE}@${IMAGE_DIGEST}\`"
+            echo "- Source revision: \`${GITHUB_SHA}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
