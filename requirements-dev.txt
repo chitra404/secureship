@@ -1,3 +1,4 @@
 -r requirements.txt
-httpx2==2.16.0
+alembic>=1.14,<2.0
+httpx
 pytest==9.2.0
