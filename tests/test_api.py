@@ -1,10 +1,11 @@
+
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import __version__
-from app.main import app, store
+from app import __version__, crud
+from app.main import app
 
 client = TestClient(app)
 
@@ -14,13 +15,6 @@ VALID = {
     "destination": "Pokhara, Nepal",
     "item": "Laptop",
 }
-
-
-@pytest.fixture(autouse=True)
-def clean_store():
-    store.clear()
-    yield
-    store.clear()
 
 
 def create(**overrides):
@@ -43,8 +37,8 @@ def test_api_status_endpoint() -> None:
 
 
 def test_project_version_file_matches_app_version() -> None:
-    text = Path(__file__).resolve().parent.parent.joinpath("PROJECT_VERSION").read_text()
-    assert text.strip() == f"SecureShip {__version__}"
+    version_file = Path(__file__).resolve().parent.parent / "PROJECT_VERSION"
+    assert version_file.read_text().strip() == f"SecureShip {__version__}"
 
 
 # ------------------------------- frontend -----------------------------------
@@ -96,18 +90,22 @@ def test_list_and_get_shipment() -> None:
 def test_advance_through_all_statuses() -> None:
     code = create().json()["tracking_code"]
     seen = []
+
     for _ in range(3):
         response = client.post(f"/api/v1/shipments/{code}/advance")
         assert response.status_code == 200
         seen.append(response.json()["status"])
+
     assert seen == ["in_transit", "out_for_delivery", "delivered"]
     assert len(client.get(f"/api/v1/shipments/{code}").json()["history"]) == 4
 
 
 def test_cannot_advance_after_delivered() -> None:
     code = create().json()["tracking_code"]
+
     for _ in range(3):
         client.post(f"/api/v1/shipments/{code}/advance")
+
     assert client.post(f"/api/v1/shipments/{code}/advance").status_code == 409
 
 
@@ -139,11 +137,12 @@ def test_unknown_fields_are_rejected() -> None:
 
 def test_text_is_stored_as_plain_text_not_html() -> None:
     body = create(receiver="<script>alert(1)</script>").json()
-    assert body["receiver"] == "<script>alert(1)</script>"  # stored verbatim; the UI uses textContent
+    assert body["receiver"] == "<script>alert(1)</script>"
 
 
 def test_store_limit_returns_429(monkeypatch) -> None:
-    monkeypatch.setattr(store, "_limit", 2)
+    monkeypatch.setattr(crud, "MAX_SHIPMENTS", 2)
     assert create().status_code == 201
     assert create().status_code == 201
     assert create().status_code == 429
+
