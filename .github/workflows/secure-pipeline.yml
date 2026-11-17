@@ -9,7 +9,7 @@ on:
       - main
   workflow_dispatch:
 
-# Default for every job: read-only. Jobs below only ask for more if they need it.
+# Default permissions are read-only.
 permissions:
   contents: read
 
@@ -21,17 +21,36 @@ env:
   IMAGE_NAME: ghcr.io/${{ github.repository }}
   LOCAL_IMAGE: secureship-api:${{ github.sha }}
 
-# Every third-party action is pinned to a full commit SHA (the comment shows the
-# human-readable version). Dependabot keeps these up to date.
-
 jobs:
   # ---------------------------------------------------------------------------
-  # Job 1: runs for pull requests AND pushes. Read-only. Cannot publish or sign.
+  # Job 1: Test, build, scan and generate SBOM.
+  # Runs for pull requests and pushes.
   # ---------------------------------------------------------------------------
   build-scan:
     name: Test, build, scan, SBOM
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
+    # Temporary PostgreSQL database for GitHub Actions tests.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: secureship_test
+          POSTGRES_USER: secureship_user
+          POSTGRES_PASSWORD: ci_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U secureship_user -d secureship_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # The test suite uses this database instead of your local database.
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://secureship_user:ci_test_password@localhost:5432/secureship_test
+
     permissions:
       contents: read
 
@@ -61,7 +80,7 @@ jobs:
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             -t "${LOCAL_IMAGE}" .
 
-      # Report first (never fails) so the evidence is kept even when the gate fails.
+      # Informational vulnerability report.
       - name: Trivy report (HIGH and CRITICAL, informational)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -78,9 +97,13 @@ jobs:
       - name: Show Trivy report
         if: always()
         run: |
-          if [ -f trivy-report.txt ]; then cat trivy-report.txt; else echo "No Trivy report was produced."; fi
+          if [ -f trivy-report.txt ]; then
+            cat trivy-report.txt
+          else
+            echo "No Trivy report was produced."
+          fi
 
-      # The release gate: any fixable CRITICAL finding stops the pipeline here.
+      # Release gate: fail on fixable CRITICAL vulnerabilities.
       - name: Trivy release gate (fails on CRITICAL)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -118,7 +141,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
-      # Hand the exact image that passed the gate to the publish job.
+      # Save the approved image only on pushes to main.
       - name: Save approved image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: docker save "${LOCAL_IMAGE}" -o image.tar
@@ -133,8 +156,7 @@ jobs:
           retention-days: 1
 
   # ---------------------------------------------------------------------------
-  # Job 2: runs ONLY for a push to main, and only if job 1 passed.
-  # This is the only job that can write packages or request an OIDC token.
+  # Job 2: Publish and sign ONLY after a successful push to main.
   # ---------------------------------------------------------------------------
   publish-sign:
     name: Publish, sign, verify
@@ -142,10 +164,11 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     permissions:
       contents: read
-      packages: write # push the image to GHCR
-      id-token: write # keyless Cosign signing (GitHub OIDC)
+      packages: write
+      id-token: write
 
     steps:
       - name: Download approved image
@@ -166,7 +189,9 @@ jobs:
       - name: Publish approved image
         run: |
           set -euo pipefail
+
           IMAGE="$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+
           docker tag "${LOCAL_IMAGE}" "${IMAGE}:${GITHUB_SHA}"
           docker push "${IMAGE}:${GITHUB_SHA}"
 
@@ -191,10 +216,10 @@ jobs:
           set -euo pipefail
           cosign sign --yes "${IMAGE}@${IMAGE_DIGEST}"
 
-      # Verify against a FIXED policy: this exact repo, this workflow file, main branch.
       - name: Verify image signature
         run: |
           set -euo pipefail
+
           cosign verify \
             --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/secure-pipeline.yml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
