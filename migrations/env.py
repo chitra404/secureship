@@ -1,4 +1,3 @@
-
 import os
 from logging.config import fileConfig
 
@@ -12,21 +11,29 @@ from app import models
 
 config = context.config
 
-# Configure Python logging.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Load SQLAlchemy model metadata for Alembic autogeneration.
 target_metadata = Base.metadata
 
 
 def get_database_url() -> str:
-    """Read the database URL from the environment."""
+    """Read and normalize the database URL from the environment."""
+
     database_url = os.getenv("DATABASE_URL")
 
     if not database_url:
         raise RuntimeError(
             "DATABASE_URL environment variable is required."
+        )
+
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace(
+            "postgres://", "postgresql+psycopg://", 1
+        )
+    elif database_url.startswith("postgresql://"):
+        database_url = database_url.replace(
+            "postgresql://", "postgresql+psycopg://", 1
         )
 
     return database_url
@@ -79,4 +86,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-
