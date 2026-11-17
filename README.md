@@ -1,248 +1,299 @@
-# SecureShip: DevSecOps Supply Chain Security Pipeline
+# SecureShip
 
-SecureShip is a practical reference project that shows how to **test, build, scan,
-approve, publish, sign and verify** a Docker container image using an automated
-GitHub Actions pipeline.
+SecureShip is a small shipment tracking app and a DevSecOps project.
 
-The sample workload is a small **shipment tracker**: a simple web page (frontend) backed by
-a Python FastAPI REST API (backend). You can create shipments, get a tracking code, search
-them, and move each one through `Created → In transit → Out for delivery → Delivered`.
-The app is the thing being protected; the real project is the **pipeline around it**.
+You can create a shipment, get a tracking code, and check its progress. The app uses FastAPI for the API, a simple web page for the frontend, and PostgreSQL to save shipment data.
 
-No AWS account, credit card, Kubernetes cluster or paid service is needed.
+The main focus of this project is the security pipeline that checks the Docker image before it is released.
 
-## What the pipeline does
+## What the project does
 
-| # | Step | Tool | Runs on |
-|---|------|------|---------|
-| 1 | Run tests | pytest | PR + push |
-| 2 | Build the Docker image | Docker | PR + push |
-| 3 | Scan the image, write a HIGH/CRITICAL report | Trivy | PR + push |
-| 4 | **Release gate**: fail on any fixable CRITICAL finding | Trivy | PR + push |
-| 5 | Generate an SPDX SBOM | Syft | PR + push |
-| 6 | Publish the approved image to GHCR | Docker | push to `main` only |
-| 7 | Sign the image digest (keyless) | Cosign | push to `main` only |
-| 8 | Verify the signature against a fixed identity | Cosign | push to `main` only |
+The shipment app lets you:
 
-The pipeline is split into **two jobs**:
+- Create a shipment.
+- Get a tracking code.
+- View shipment details and status history.
+- Move a shipment through its status steps.
 
-- `build-scan` (steps 1-5) is **read-only**. It runs for pull requests and cannot publish or sign.
-- `publish-sign` (steps 6-8) runs **only** for a push to `main`, and **only** if `build-scan` passed.
-  It is the only job allowed to write packages or request a signing identity (OIDC) token.
+The status steps are:
 
-The exact image that passed the scan is handed to the publish job, so what you scan
-is what you ship.
+`Created → In transit → Out for delivery → Delivered`
 
-## Project layout
+The GitHub Actions pipeline checks the application and Docker image before publishing it.
+
+## Security pipeline
+
+The pipeline has two jobs.
+
+### 1. Build and scan
+
+This job runs for pull requests and pushes. It:
+
+1. Runs the tests with pytest.
+2. Builds the Docker image.
+3. Scans the image with Trivy.
+4. Stops the pipeline if it finds a fixable CRITICAL vulnerability.
+5. Creates an SPDX SBOM with Syft.
+
+This job does not publish or sign the image.
+
+### 2. Publish and sign
+
+This job runs only after a successful push to `main`, and only when the first job passes. It:
+
+1. Publishes the image to GitHub Container Registry (GHCR).
+2. Signs the image with Cosign using GitHub OIDC.
+3. Verifies the image signature.
+
+The pipeline passes the same image from the scan job to the publish job. This means the image that gets published is the image that was scanned.
+
+## Tools used
+
+| Tool | Use |
+|---|---|
+| Python and FastAPI | Backend API |
+| HTML, CSS and JavaScript | Frontend |
+| PostgreSQL | Stores shipment data |
+| SQLAlchemy | Connects the application to PostgreSQL |
+| Alembic | Manages database changes |
+| pytest | Runs tests |
+| Docker | Builds the application image |
+| GitHub Actions | Runs the pipeline |
+| Trivy | Scans the image for vulnerabilities |
+| Syft | Creates the SBOM |
+| Cosign | Signs and verifies the image |
+
+## Project structure
 
 ```text
 secureship/
 ├── .github/
-│   ├── dependabot.yml              # keeps pins and dependencies fresh
-│   └── workflows/secure-pipeline.yml
+│   ├── dependabot.yml
+│   └── workflows/
+│       └── secure-pipeline.yml
 ├── app/
-│   ├── main.py                     # FastAPI routes + security headers
-│   ├── schemas.py                  # request/response models and validation
-│   ├── store.py                    # in-memory shipment storage
-│   └── static/                     # frontend: index.html, style.css, app.js
-├── scripts/                        # helper Bash scripts (see below)
-├── tests/                          # pytest tests
-├── docs/                           # architecture, step-by-step guide, policy
+│   ├── static/
+│   │   ├── app.js
+│   │   ├── index.html
+│   │   └── style.css
+│   ├── crud.py
+│   ├── database.py
+│   ├── dependencies.py
+│   ├── main.py
+│   ├── models.py
+│   └── schemas.py
+├── migrations/
+│   └── versions/
+├── scripts/
+├── tests/
+│   ├── conftest.py
+│   └── test_api.py
+├── docs/
 ├── Dockerfile
 ├── Makefile
-├── pytest.ini
-├── requirements.txt                # runtime dependencies (pinned)
-└── requirements-dev.txt            # test dependencies (pinned)
+├── alembic.ini
+├── requirements.txt
+├── requirements-dev.txt
+└── pytest.ini
 ```
 
 ## Requirements
 
+You need:
+
 - Git
-- Python 3.12 or newer, with `pip`
-- Docker Engine or Docker Desktop
+- Python 3.12 or newer
+- Docker
+- PostgreSQL
 - A GitHub account
-- Optional, for running the security tools on your own machine: Trivy, Syft, Cosign
 
-## 1. Run it locally
+Trivy, Syft and Cosign are optional if you only want to run the application locally. They are used by the security pipeline.
 
-From the project root:
+## Run it locally
+
+### 1. Get the project
+
+```bash
+git clone https://github.com/chitra404/secureship.git
+cd secureship
+```
+
+### 2. Create and activate a virtual environment
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
+source .venv/bin/activate
+```
+
+### 3. Install the dependencies
+
+```bash
 pip install -r requirements-dev.txt
-pytest -q
+```
+
+### 4. Set the database connection
+
+Create a PostgreSQL database and user for local development. Then set the connection URL in your terminal:
+
+```bash
+export DATABASE_URL="postgresql+psycopg://USER:PASSWORD@HOST:PORT/DATABASE"
+```
+
+Replace the example values with your local PostgreSQL details. Do not commit your real database URL or password to Git.
+
+### 5. Create the database tables
+
+Run the migrations:
+
+```bash
+alembic upgrade head
+```
+
+### 6. Start the application
+
+```bash
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Open **http://127.0.0.1:8000/** in your browser. That is the web app.
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000) in your browser.
 
 Stop the server with `Ctrl+C`.
 
-### Using the app
+## Using the app
 
-1. Fill in *Sender*, *Receiver*, *Destination* and *Item*, then click **Create shipment**.
-2. A tracking code like `SS-1A2B3C4D` appears and the shipment shows in the list.
-3. Click **Advance status** to move it to the next stage, until it says *Delivered*.
-4. Use the search box to find a shipment by tracking code or receiver name.
+1. Enter the sender, receiver, destination and item.
+2. Create the shipment.
+3. Keep the tracking code that appears.
+4. Use the tracking code to view the shipment.
+5. Advance the status to see the next step.
 
-Data is kept in memory only, so it resets when the app restarts. That is deliberate:
-there is no database to secure, and the container can run with a read-only filesystem.
+Shipment information is stored in PostgreSQL, so it is not lost when the application restarts.
 
-### API endpoints
+## API endpoints
 
-| Method | Path | What it does |
-|--------|------|--------------|
-| GET | `/` | The web page |
-| GET | `/health` | Health check (used by Docker) |
-| GET | `/api/v1/status` | Service status, version, shipment count |
-| GET | `/api/v1/shipments` | List shipments (newest first) |
-| POST | `/api/v1/shipments` | Create a shipment |
-| GET | `/api/v1/shipments/{code}` | Track one shipment |
-| POST | `/api/v1/shipments/{code}/advance` | Move to the next status |
-| GET | `/docs` | Interactive API docs |
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/` | Opens the web page |
+| `GET` | `/health` | Health check |
+| `GET` | `/api/v1/status` | Shows service status and shipment count |
+| `GET` | `/api/v1/shipments` | Lists shipments |
+| `POST` | `/api/v1/shipments` | Creates a shipment |
+| `GET` | `/api/v1/shipments/{code}` | Gets one shipment by tracking code |
+| `POST` | `/api/v1/shipments/{code}/advance` | Moves a shipment to the next status |
+| `GET` | `/docs` | Opens the API documentation |
 
-The input is validated (length limits, no unknown fields), the number of stored
-shipments is capped, and the page ships with a strict Content-Security-Policy.
+## Database migrations
 
-## 2. Run it in Docker
+The project uses Alembic to manage database changes.
 
-```bash
-make build          # or: docker build -t secureship-api:local .
-make docker-run     # runs with a read-only filesystem and all capabilities dropped
-```
-
-Then open http://127.0.0.1:8000/ (the app) or http://127.0.0.1:8000/health. To confirm the container is not root:
+After changing the database models, create a migration:
 
 ```bash
-docker run --rm --entrypoint id secureship-api:local     # expect uid=10001(appuser)
+alembic revision --autogenerate -m "describe the change"
 ```
 
-## 3. Run the security tools locally (optional)
+Review the generated migration before applying it.
 
-Install Trivy and Syft from their official documentation, then:
+Apply migrations with:
 
 ```bash
-make scan           # Trivy: fails on fixable CRITICAL findings
-make sbom           # Syft: writes sbom.spdx.json
+alembic upgrade head
 ```
 
-A scanner finding is not proof that something is exploitable. Investigate it,
-upgrade the package or base image, and document any justified exception
-(see `docs/SECURITY_POLICY.md`). Never just switch the scan off.
-
-## Helper scripts (Bash)
-
-All scripts are in `scripts/`. Run them from the project root. On Windows use Git Bash or WSL.
-
-| Script | What it does |
-|--------|--------------|
-| `./scripts/setup.sh` | Checks Python 3.12+, creates `.venv`, installs dependencies, runs the tests |
-| `./scripts/check.sh` | Pre-push check: tests, plus Docker build, non-root test, hardened container health test, Trivy gate and SBOM **if those tools are installed** (otherwise they are skipped). Exits with an error if anything fails |
-| `./scripts/push-to-github.sh USERNAME [REPO]` | First-time push to a new empty GitHub repo (validates the lowercase name, sets `main`, commits, pushes) |
-| `./scripts/verify-image.sh OWNER/REPO sha256:DIGEST` | Verifies a published image with Cosign against the fixed workflow identity |
-| `./scripts/demo-gate.sh start` / `cleanup` | Creates (and later removes) a throwaway branch with a vulnerable dependency to prove the release gate blocks it |
-
-Shortcuts: `make setup` and `make check`.
-
-## 4. Put it on GitHub
-
-Easiest way: create the empty repository on GitHub, then run
-`./scripts/push-to-github.sh YOUR-USERNAME`. Or do it by hand:
-
-1. On GitHub, create a new **empty** repository named `secureship`
-   (lowercase; GHCR image names must be lowercase).
-2. Extract the ZIP and open a terminal **inside** the `secureship` folder.
-3. Run:
+Check the current migration:
 
 ```bash
-git init
-git add .
-git commit -m "Initial SecureShip implementation"
-git branch -M main
-git remote add origin https://github.com/YOUR-USERNAME/secureship.git
-git push -u origin main
+alembic current
 ```
 
-Replace `YOUR-USERNAME` with your GitHub username.
-
-The push to `main` starts the pipeline. **You do not need a personal access token
-or any repository secret.** The workflow uses the built-in `GITHUB_TOKEN`, and the
-two permissions it needs (`packages: write` and `id-token: write`) are declared
-in the workflow file itself, only on the publish job.
-
-## 5. Check that it worked
-
-1. Open the repository's **Actions** tab and open the latest run.
-2. You should see two green jobs: **Test, build, scan, SBOM** and **Publish, sign, verify**.
-3. In the run's **Artifacts** section you will find the SBOM and the Trivy report.
-4. On the repository home page, open **Packages** (right sidebar) to see the image.
-5. The summary of the publish job shows the image name and its digest (`sha256:...`).
-
-## 6. Verify a published image yourself
-
-Use a recent version of Cosign. Replace `OWNER`, `REPOSITORY` and `DIGEST` with your real values:
+Check whether the models and database schema are in sync:
 
 ```bash
-cosign verify \
-  --certificate-identity "https://github.com/OWNER/REPOSITORY/.github/workflows/secure-pipeline.yml@refs/heads/main" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  ghcr.io/OWNER/REPOSITORY@sha256:DIGEST
+alembic check
 ```
 
-A new GHCR package is **private** by default. If you are verifying from a machine that is
-not logged in, either run `docker login ghcr.io` first, or make the package public in
-**Package settings → Danger Zone → Change visibility**.
+## Run the tests
 
-## 7. Prove the release gate works
+The tests use a separate PostgreSQL database. Do not point `TEST_DATABASE_URL` at your development or production database.
 
-A security gate you have never seen fail is a gate you cannot trust. Follow
-**Phase 6** in `docs/IMPLEMENTATION_GUIDE.md` to open a pull request that is
-deliberately blocked, without touching `main`.
+Set the test database URL:
+
+```bash
+export TEST_DATABASE_URL="postgresql+psycopg://USER:PASSWORD@HOST:PORT/TEST_DATABASE"
+```
+
+Then run:
+
+```bash
+python -m pytest -v
+```
+
+The test setup creates the required tables and clears test data between tests. It also removes the test tables when the test session finishes. Use a separate test database that contains no data you need to keep.
+
+## Run the security checks locally
+
+If you have Trivy and Syft installed, you can run:
+
+```bash
+make scan
+make sbom
+```
+
+You can also run the project checks with:
+
+```bash
+make check
+```
+
+Some checks are skipped when the related tools are not installed.
+
+A vulnerability report needs to be reviewed. A finding does not always mean the application can be exploited, but it should not be ignored. Check the affected package and available fix before making a decision.
+
+## GitHub Actions
+
+After pushing to `main`, open the **Actions** tab in the GitHub repository to see the pipeline result.
+
+When the pipeline passes, you should be able to find:
+
+- The test, build and scan results.
+- The Trivy report and SBOM artifacts.
+- The published image in GHCR.
+- The image digest and Cosign verification result.
+
+Pull requests can run the build and scan job, but they cannot publish or sign an image.
 
 ## Security notes
 
-- Pull requests cannot publish or sign: the publish job is skipped for them, and
-  the read-only job has no write or OIDC permission.
-- Keyless signing uses a short-lived GitHub OIDC identity. There is **no
-  long-lived private signing key** to steal or leak.
-- Every third-party GitHub Action is pinned to a full commit SHA, and the Trivy
-  binary is pinned to an explicit version. This matters: in March 2026 the
-  Trivy GitHub Actions and a Trivy release were compromised through mutable version
-  tags. SHA pinning is the defence. Dependabot (`.github/dependabot.yml`) proposes updates
-  so the pins do not go stale. Review those PRs.
-- The gate blocks fixable CRITICAL findings. An image with zero CRITICAL findings is
-  **not** necessarily free of vulnerabilities.
-- A valid signature proves *who built and signed* the image. It does not prove the
-  application is safe.
+- The publish job runs only after the build and scan job succeeds.
+- Pull requests do not get permission to publish packages or request the signing identity.
+- Cosign uses GitHub OIDC for keyless signing. The workflow does not need a long-lived private signing key.
+- GitHub Actions are pinned to commit SHAs in the workflow. Dependabot is used to suggest updates.
+- The Trivy gate blocks fixable CRITICAL findings. Passing the scan does not mean the image has no vulnerabilities.
+- A valid image signature shows which workflow identity signed the image. It does not prove that the application itself is free from security issues.
 
-## Troubleshooting
+SecureShip is a learning and demonstration project. Review the API access rules and deployment settings before using it with real shipment or customer data.
 
-**Publish job: "denied" or "permission_denied" when pushing to GHCR**
-Check that the job `publish-sign` still has `packages: write`. If the package already
-exists from an older attempt and was created by someone else, open the package
-settings and give this repository **Write** access under *Manage Actions access*.
+## Useful scripts
 
-**Cosign: "no OIDC token" / "id-token" error**
-The `publish-sign` job must have `id-token: write`. Do not remove it.
+The helper scripts are in the `scripts/` directory.
 
-**Cosign verify says the identity does not match**
-The identity is tied to the exact repository, workflow file name and branch. The file must
-stay at `.github/workflows/secure-pipeline.yml`, and the run must be a push to `main`.
+| Script | Purpose |
+|---|---|
+| `./scripts/setup.sh` | Sets up the Python environment and installs dependencies |
+| `./scripts/check.sh` | Runs the available project checks |
+| `./scripts/verify-image.sh OWNER/REPO sha256:DIGEST` | Verifies a published image |
+| `./scripts/demo-gate.sh start` | Starts the release-gate demonstration |
+| `./scripts/demo-gate.sh cleanup` | Cleans up the demonstration branch |
 
-**Trivy fails with `TOOMANYREQUESTS` / cannot download the vulnerability DB**
-This is a rate limit on the public DB registry, not a problem in your project. Click
-**Re-run failed jobs** after a few minutes.
+You can also use:
 
-**Trivy blocks the image**
-Open the Trivy output. Look at the package, installed version and fixed version. Update
-the dependency in `requirements.txt` or move to a newer base image in the `Dockerfile`.
+```bash
+make setup
+make check
+```
 
-**Local `docker build` fails**
-Make sure Docker is running and that you are in the project root (where the `Dockerfile` is).
+## Links
 
-## Project boundary
+- GitHub repository: https://github.com/chitra404/secureship
+- Live application: https://secureship-1sce.onrender.com
 
-SecureShip secures the **container delivery path**. It is not a runtime threat
-detection system, a complete vulnerability management platform, or a guarantee that
-every signed image is secure.

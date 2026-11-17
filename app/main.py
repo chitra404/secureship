@@ -1,12 +1,14 @@
+
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Path as PathParam, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Path as PathParam, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.orm import Session
 
-from app import __version__
+from app import __version__, crud
+from app.dependencies import get_db
 from app.schemas import Shipment, ShipmentCreate
-from app.store import AlreadyDelivered, ShipmentNotFound, ShipmentStore, StoreFull
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
@@ -17,9 +19,7 @@ app = FastAPI(
     description="A small shipment tracker used to demonstrate the SecureShip security pipeline.",
     version=__version__,
 )
-store = ShipmentStore()
 
-# The interactive API docs load scripts from a CDN, so the strict CSP skips them.
 DOCS_PATHS = ("/docs", "/redoc", "/openapi.json")
 
 
@@ -31,10 +31,13 @@ async def add_security_headers(request: Request, call_next) -> Response:
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Cache-Control", "no-store")
+
     if not request.url.path.startswith(DOCS_PATHS):
         response.headers.setdefault(
-            "Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'"
+            "Content-Security-Policy",
+            "default-src 'self'; frame-ancestors 'none'",
         )
+
     return response
 
 
@@ -51,52 +54,77 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 # ------------------------------ Health -------------------------------------
 @app.get("/health", tags=["health"])
 def health() -> dict[str, str]:
-    """Lightweight health check (used by the Docker HEALTHCHECK)."""
+    """Lightweight health check used by the Docker HEALTHCHECK."""
     return {"status": "healthy"}
 
 
 @app.get("/api/v1/status", tags=["api"])
-def api_status() -> dict[str, str | int]:
-    """Return service status and how many shipments are stored."""
+def api_status(db: Session = Depends(get_db)) -> dict[str, str | int]:
+    """Return service status and the number of stored shipments."""
     return {
         "service": "secureship-api",
         "version": app.version,
         "status": "operational",
-        "shipments": store.count(),
+        "shipments": crud.count_shipments(db),
     }
 
 
 # ----------------------------- Shipments -----------------------------------
 @app.get("/api/v1/shipments", response_model=list[Shipment], tags=["shipments"])
-def list_shipments() -> list[Shipment]:
+def list_shipments(db: Session = Depends(get_db)) -> list[Shipment]:
     """List all shipments, newest first."""
-    return store.list()
+    return crud.list_shipments(db)
 
 
-@app.post("/api/v1/shipments", response_model=Shipment, status_code=201, tags=["shipments"])
-def create_shipment(data: ShipmentCreate) -> Shipment:
+@app.post(
+    "/api/v1/shipments",
+    response_model=Shipment,
+    status_code=201,
+    tags=["shipments"],
+)
+def create_shipment(
+    data: ShipmentCreate,
+    db: Session = Depends(get_db),
+) -> Shipment:
     """Create a new shipment with a generated tracking code."""
     try:
-        return store.create(data)
-    except StoreFull:
-        raise HTTPException(status_code=429, detail="Shipment limit reached. Try again later.")
+        return crud.create_shipment(db, data)
+    except crud.StoreFull:
+        raise HTTPException(
+            status_code=429,
+            detail="Shipment limit reached. Try again later.",
+        )
 
 
 @app.get("/api/v1/shipments/{code}", response_model=Shipment, tags=["shipments"])
-def get_shipment(code: str = PathParam(pattern=CODE_PATTERN)) -> Shipment:
+def get_shipment(
+    code: str = PathParam(pattern=CODE_PATTERN),
+    db: Session = Depends(get_db),
+) -> Shipment:
     """Track one shipment by its tracking code."""
     try:
-        return store.get(code)
-    except ShipmentNotFound:
+        return crud.get_shipment(db, code)
+    except crud.ShipmentNotFound:
         raise HTTPException(status_code=404, detail="Shipment not found.")
 
 
-@app.post("/api/v1/shipments/{code}/advance", response_model=Shipment, tags=["shipments"])
-def advance_shipment(code: str = PathParam(pattern=CODE_PATTERN)) -> Shipment:
+@app.post(
+    "/api/v1/shipments/{code}/advance",
+    response_model=Shipment,
+    tags=["shipments"],
+)
+def advance_shipment(
+    code: str = PathParam(pattern=CODE_PATTERN),
+    db: Session = Depends(get_db),
+) -> Shipment:
     """Move a shipment to its next status."""
     try:
-        return store.advance(code)
-    except ShipmentNotFound:
+        return crud.advance_shipment(db, code)
+    except crud.ShipmentNotFound:
         raise HTTPException(status_code=404, detail="Shipment not found.")
-    except AlreadyDelivered:
-        raise HTTPException(status_code=409, detail="Shipment is already delivered.")
+    except crud.AlreadyDelivered:
+        raise HTTPException(
+            status_code=409,
+            detail="Shipment is already delivered.",
+        )
+
